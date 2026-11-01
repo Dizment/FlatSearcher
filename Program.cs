@@ -21,8 +21,19 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
 {
     const string KufarUrl =
         "https://api.kufar.by/search-api/v2/search/rendered-paginated" +
-        "?cat=1010&typ=let&cur=USD&lang=ru&size=30&sort=lst.d" +
-        "&gtsy=country-belarus~province-mogilevskaja_oblast~locality-bobrujsk";
+        "?cat=1010&typ=let&cur=USD&lang=ru&size=30&sort=lst.d&gtsy=";
+
+    // KUFAR_GTSY переопределяет фильтр города; иначе пробуются варианты по очереди
+    static readonly List<string> GtsyCandidates = Environment.GetEnvironmentVariable("KUFAR_GTSY") is { Length: > 0 } g
+        ? new List<string> { g }
+        : new List<string>
+        {
+            "country-belarus~province-mogilevskaja_oblast~area-bobrujsk",
+            "country-belarus~province-mogilevskaja_oblast~locality-bobrujsk",
+            "country-belarus~province-mogilevskaja_oblast~area-bobruisk",
+        };
+
+    internal static string LastRaw = "";
 
     internal static readonly string BotToken = Environment.GetEnvironmentVariable("TG_BOT_TOKEN") ?? "";
     internal static readonly string ChatId = Environment.GetEnvironmentVariable("TG_CHAT_ID") ?? "";
@@ -79,8 +90,15 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
 
     internal static async Task<List<JsonNode?>> FetchAds(HttpClient http, CancellationToken ct)
     {
-        var json = JsonNode.Parse(await http.GetStringAsync(KufarUrl, ct));
-        return json?["ads"]?.AsArray().ToList() ?? [];
+        foreach (var gtsy in GtsyCandidates.ToList())
+        {
+            LastRaw = await http.GetStringAsync(KufarUrl + gtsy, ct);
+            var ads = JsonNode.Parse(LastRaw)?["ads"]?.AsArray().ToList() ?? [];
+            if (ads.Count == 0) continue;
+            GtsyCandidates.RemoveAll(x => x != gtsy); // запоминаем рабочий вариант
+            return ads;
+        }
+        return [];
     }
 
     internal static string Format(JsonNode ad)
@@ -156,7 +174,7 @@ class BotListener(IHttpClientFactory httpFactory, ILogger<BotListener> log) : Ba
 
                     var ads = await KufarWatcher.FetchAds(http, ct);
                     await KufarWatcher.Notify(http,
-                        ads.Count > 0 ? KufarWatcher.Format(ads[0]!) : "Объявлений нет", ct);
+                        ads.Count > 0 ? KufarWatcher.Format(ads[0]!) : $"Объявлений нет. Ответ Kufar: {KufarWatcher.LastRaw[..Math.Min(400, KufarWatcher.LastRaw.Length)]}", ct);
                 }
             }
             catch (Exception e) when (e is not OperationCanceledException)
