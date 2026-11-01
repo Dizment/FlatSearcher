@@ -9,6 +9,7 @@ builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
 builder.Services.AddHttpClient();
 builder.Services.AddHostedService<KufarWatcher>();
+builder.Services.AddHostedService<BotListener>();
 builder.Services.AddHostedService<SelfPinger>();
 
 var app = builder.Build();
@@ -23,9 +24,10 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
         "?cat=1010&typ=let&cur=USD&lang=ru&size=30&sort=lst.d" +
         "&gtsy=country-belarus~province-mogilevskaja_oblast~locality-bobrujsk";
 
-    static readonly string BotToken = Environment.GetEnvironmentVariable("TG_BOT_TOKEN") ?? "";
-    static readonly string ChatId = Environment.GetEnvironmentVariable("TG_CHAT_ID") ?? "";
+    internal static readonly string BotToken = Environment.GetEnvironmentVariable("TG_BOT_TOKEN") ?? "";
+    internal static readonly string ChatId = Environment.GetEnvironmentVariable("TG_CHAT_ID") ?? "";
     static readonly int IntervalSec = int.TryParse(Environment.GetEnvironmentVariable("POLL_INTERVAL"), out var i) ? i : 60;
+    static readonly int TestSendLast = int.TryParse(Environment.GetEnvironmentVariable("TEST_SEND_LAST"), out var t) ? t : 0;
     static readonly string StateFile = Path.Combine(AppContext.BaseDirectory, "seen.json");
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -48,13 +50,13 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
         {
             try
             {
-                var json = JsonNode.Parse(await http.GetStringAsync(KufarUrl, ct));
-                var ads = json?["ads"]?.AsArray().ToList() ?? [];
+                var ads = await FetchAds(http, ct);
                 var fresh = ads.Where(a => !seen.Contains(a!["ad_id"]!.ToString())).ToList();
 
                 if (firstRun)
                 {
-                    fresh.Clear(); // при первом запуске только запоминаем текущие
+                    // при первом запуске только запоминаем текущие; TEST_SEND_LAST=N шлёт N последних для проверки
+                    fresh = fresh.Take(TestSendLast).ToList();
                     await Notify(http, "Слежение за квартирами в Бобруйске запущено.", ct);
                     firstRun = false;
                 }
@@ -75,7 +77,13 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
         }
     }
 
-    static string Format(JsonNode ad)
+    internal static async Task<List<JsonNode?>> FetchAds(HttpClient http, CancellationToken ct)
+    {
+        var json = JsonNode.Parse(await http.GetStringAsync(KufarUrl, ct));
+        return json?["ads"]?.AsArray().ToList() ?? [];
+    }
+
+    internal static string Format(JsonNode ad)
     {
         var p = new Dictionary<string, string>();
         foreach (var x in ad["ad_parameters"]?.AsArray() ?? [])
@@ -96,11 +104,18 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
         return string.Join("\n", lines);
     }
 
-    static async Task Notify(HttpClient http, string text, CancellationToken ct)
+    internal const string ButtonText = "Последнее объявление";
+
+    internal static async Task Notify(HttpClient http, string text, CancellationToken ct)
     {
         var resp = await http.PostAsync(
             $"https://api.telegram.org/bot{BotToken}/sendMessage",
-            new FormUrlEncodedContent(new Dictionary<string, string> { ["chat_id"] = ChatId, ["text"] = text }),
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["chat_id"] = ChatId,
+                ["text"] = text,
+                ["reply_markup"] = $"{{\"keyboard\":[[{{\"text\":\"{ButtonText}\"}}]],\"resize_keyboard\":true}}",
+            }),
             ct);
         resp.EnsureSuccessStatusCode();
     }
@@ -109,6 +124,47 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
     {
         try { return JsonSerializer.Deserialize<HashSet<string>>(File.ReadAllText(StateFile)); }
         catch (FileNotFoundException) { return null; }
+    }
+}
+
+// Long polling: по нажатию кнопки присылает самое свежее объявление
+class BotListener(IHttpClientFactory httpFactory, ILogger<BotListener> log) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        if (KufarWatcher.BotToken == "" || KufarWatcher.ChatId == "") return;
+
+        var http = httpFactory.CreateClient();
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
+        http.Timeout = TimeSpan.FromSeconds(60);
+        long offset = 0;
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var url = $"https://api.telegram.org/bot{KufarWatcher.BotToken}/getUpdates?timeout=30&offset={offset}";
+                var updates = JsonNode.Parse(await http.GetStringAsync(url, ct))?["result"]?.AsArray() ?? [];
+
+                foreach (var u in updates)
+                {
+                    offset = u!["update_id"]!.GetValue<long>() + 1;
+                    var msg = u["message"];
+                    // отвечаем только владельцу бота
+                    if (msg?["chat"]?["id"]?.ToString() != KufarWatcher.ChatId) continue;
+                    if (msg["text"]?.ToString() is not (KufarWatcher.ButtonText or "/start" or "/last")) continue;
+
+                    var ads = await KufarWatcher.FetchAds(http, ct);
+                    await KufarWatcher.Notify(http,
+                        ads.Count > 0 ? KufarWatcher.Format(ads[0]!) : "Объявлений нет", ct);
+                }
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                log.LogError(e, "Ошибка бота");
+                await Task.Delay(TimeSpan.FromSeconds(5), ct);
+            }
+        }
     }
 }
 
