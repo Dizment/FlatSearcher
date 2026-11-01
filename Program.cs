@@ -21,17 +21,8 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
 {
     const string KufarUrl =
         "https://api.kufar.by/search-api/v2/search/rendered-paginated" +
-        "?cat=1010&typ=let&cur=USD&lang=ru&size=30&sort=lst.d&gtsy=";
-
-    // KUFAR_GTSY переопределяет фильтр города; иначе пробуются варианты по очереди
-    static readonly List<string> GtsyCandidates = Environment.GetEnvironmentVariable("KUFAR_GTSY") is { Length: > 0 } g
-        ? new List<string> { g }
-        : new List<string>
-        {
-            "country-belarus~province-mogilevskaja_oblast~area-bobrujsk",
-            "country-belarus~province-mogilevskaja_oblast~locality-bobrujsk",
-            "country-belarus~province-mogilevskaja_oblast~area-bobruisk",
-        };
+        "?cat=1010&typ=let&cur=USD&lang=ru&size=30&sort=lst.d&rgn=4&ar=12" +
+        "&gtsy=country-belarus~province-mogilyovskaja_oblast~locality-bobrujsk";
 
     internal static string LastRaw = "";
 
@@ -90,15 +81,8 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
 
     internal static async Task<List<JsonNode?>> FetchAds(HttpClient http, CancellationToken ct)
     {
-        foreach (var gtsy in GtsyCandidates.ToList())
-        {
-            LastRaw = await http.GetStringAsync(KufarUrl + gtsy, ct);
-            var ads = JsonNode.Parse(LastRaw)?["ads"]?.AsArray().ToList() ?? [];
-            if (ads.Count == 0) continue;
-            GtsyCandidates.RemoveAll(x => x != gtsy); // запоминаем рабочий вариант
-            return ads;
-        }
-        return [];
+        LastRaw = await http.GetStringAsync(KufarUrl, ct);
+        return JsonNode.Parse(LastRaw)?["ads"]?.AsArray().ToList() ?? [];
     }
 
     internal static string Format(JsonNode ad)
