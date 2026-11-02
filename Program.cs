@@ -70,7 +70,7 @@ class KufarWatcher(IHttpClientFactory httpFactory, ILogger<KufarWatcher> log) : 
                 foreach (var a in ads) seen.Add(a!["ad_id"]!.ToString());
                 File.WriteAllText(StateFile, JsonSerializer.Serialize(seen));
             }
-            catch (Exception e) when (e is not OperationCanceledException)
+            catch (Exception e) when (!ct.IsCancellationRequested)
             {
                 log.LogError(e, "Ошибка опроса");
             }
@@ -161,7 +161,7 @@ class BotListener(IHttpClientFactory httpFactory, ILogger<BotListener> log) : Ba
                         ads.Count > 0 ? KufarWatcher.Format(ads[0]!) : $"Объявлений нет. Ответ Kufar: {KufarWatcher.LastRaw[..Math.Min(400, KufarWatcher.LastRaw.Length)]}", ct);
                 }
             }
-            catch (Exception e) when (e is not OperationCanceledException)
+            catch (Exception e) when (!ct.IsCancellationRequested)
             {
                 log.LogError(e, "Ошибка бота");
                 await Task.Delay(TimeSpan.FromSeconds(5), ct);
@@ -187,7 +187,7 @@ class SelfPinger(IHttpClientFactory httpFactory, ILogger<SelfPinger> log) : Back
         {
             await Task.Delay(TimeSpan.FromMinutes(10), ct);
             try { await http.GetAsync($"{url.TrimEnd('/')}/health", ct); }
-            catch (Exception e) when (e is not OperationCanceledException)
+            catch (Exception e) when (!ct.IsCancellationRequested)
             {
                 log.LogWarning(e, "Самопинг не удался");
             }
